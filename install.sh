@@ -7,6 +7,7 @@ set -e
 REPO="kylemclaren/spritesync"
 INSTALL_DIR="/usr/local/bin"
 SYNCTHING_CONFIG_DIR="$HOME/.config/syncthing"
+TS_HOSTNAME="${SPRITESYNC_HOSTNAME:-}"
 
 # Colors and formatting
 RED='\033[0;31m'
@@ -27,6 +28,46 @@ warn()    { echo -e "  ${YELLOW}!${NC} $1"; }
 error()   { echo -e "  ${CROSS} $1"; exit 1; }
 step()    { echo -e "\n${BOLD}$1${NC}"; }
 substep() { echo -e "  ${ARROW} $1"; }
+
+# Generate random hostname
+generate_hostname() {
+    echo "sprite-$(tr -dc 'a-z0-9' < /dev/urandom | head -c 6)"
+}
+
+# Prompt for hostname or generate one
+prompt_hostname() {
+    # Skip if already set via env var
+    [ -n "$TS_HOSTNAME" ] && return 0
+
+    # Skip if already authenticated with a unique hostname
+    if tailscale status > /dev/null 2>&1; then
+        local current_name=$(tailscale status --json 2>/dev/null | jq -r '.Self.HostName // empty' 2>/dev/null)
+        # If current hostname looks unique (contains random suffix), keep it
+        if [[ "$current_name" =~ ^sprite-[a-z0-9]{6}$ ]]; then
+            return 0
+        fi
+    fi
+
+    # Prompt if running interactively
+    if [ -t 0 ]; then
+        echo ""
+        echo -e "  ${DIM}Enter a unique hostname for this device in your tailnet${NC}"
+        echo -e "  ${DIM}(e.g., sprite-api, sprite-dev, sprite-prod)${NC}"
+        echo ""
+        read -p "  Hostname [Enter to auto-generate]: " input_hostname
+
+        if [ -n "$input_hostname" ]; then
+            TS_HOSTNAME="$input_hostname"
+        else
+            TS_HOSTNAME=$(generate_hostname)
+        fi
+    else
+        # Non-interactive: generate random hostname
+        TS_HOSTNAME=$(generate_hostname)
+    fi
+
+    info "Device will be named: ${BOLD}${TS_HOSTNAME}${NC}"
+}
 
 # Detect OS and architecture
 detect_platform() {
@@ -129,8 +170,19 @@ start_tailscaled() {
 
 # Authenticate Tailscale
 auth_tailscale() {
+    # Prompt for hostname first (will skip if already set or already unique)
+    prompt_hostname
+
     if tailscale status > /dev/null 2>&1; then
         local current_name=$(tailscale status --json 2>/dev/null | jq -r '.Self.HostName // empty' 2>/dev/null)
+
+        # Update hostname if we have a new one set
+        if [ -n "$TS_HOSTNAME" ] && [ "$current_name" != "$TS_HOSTNAME" ]; then
+            substep "Updating hostname to $TS_HOSTNAME..."
+            sudo tailscale set --hostname="$TS_HOSTNAME" > /dev/null 2>&1 || true
+            current_name="$TS_HOSTNAME"
+        fi
+
         info "Tailscale authenticated as ${BOLD}${current_name:-$(hostname)}${NC}"
         return 0
     fi
@@ -139,7 +191,12 @@ auth_tailscale() {
     echo -e "  ${YELLOW}>>${NC} ${BOLD}Authenticate in your browser${NC}"
     echo ""
 
-    sudo tailscale up 2>&1 | grep -E "https://|Success" || true
+    # Include hostname in tailscale up if set
+    if [ -n "$TS_HOSTNAME" ]; then
+        sudo tailscale up --hostname="$TS_HOSTNAME" 2>&1 | grep -E "https://|Success" || true
+    else
+        sudo tailscale up 2>&1 | grep -E "https://|Success" || true
+    fi
 
     local final_name=$(tailscale status --json 2>/dev/null | jq -r '.Self.HostName // empty' 2>/dev/null)
     echo ""
