@@ -342,8 +342,20 @@ setup_syncthing_service() {
     if is_sprite; then
         substep "Creating syncthing service..."
 
-        # Force clean removal of any existing service
+        # Check if service already exists and is running
+        if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "syncthing" and .state.status == "running")' > /dev/null 2>&1; then
+            # Service exists and running - restart it to pick up any config changes
+            sprite-env services stop syncthing > /dev/null 2>&1 || true
+            sleep 1
+            sprite-env services start syncthing > /dev/null 2>&1 || true
+            sleep 2
+            info "syncthing service restarted"
+            return 0
+        fi
+
+        # Service doesn't exist or isn't running - clean up and create fresh
         sprite-env services stop syncthing > /dev/null 2>&1 || true
+        sleep 1
         sprite-env services delete syncthing > /dev/null 2>&1 || true
         sleep 2
 
@@ -356,7 +368,7 @@ setup_syncthing_service() {
             --cmd "$syncthing_path" \
             --args "serve,--no-browser,--no-default-folder,--config=$SYNCTHING_CONFIG_DIR,--data=$SYNCTHING_CONFIG_DIR" \
             --needs tailscaled \
-            --no-stream 2>&1 || true
+            --no-stream > /dev/null 2>&1 || true
 
         # Verify service is actually running
         sleep 3
@@ -399,21 +411,33 @@ setup_spritesync_service() {
     if is_sprite; then
         substep "Creating spritesync service..."
 
-        # Force clean removal of any existing service
-        sprite-env services stop spritesync > /dev/null 2>&1 || true
-        sprite-env services delete spritesync > /dev/null 2>&1 || true
-        sleep 2
-
         if [ ! -x "$INSTALL_DIR/spritesync" ]; then
             warn "spritesync binary not found at $INSTALL_DIR/spritesync - skipping service"
             return 0
         fi
 
+        # Check if service already exists and is running
+        if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "spritesync" and .state.status == "running")' > /dev/null 2>&1; then
+            # Service exists and running - restart it to use new binary
+            sprite-env services stop spritesync > /dev/null 2>&1 || true
+            sleep 1
+            sprite-env services start spritesync > /dev/null 2>&1 || true
+            sleep 2
+            info "spritesync discovery service restarted"
+            return 0
+        fi
+
+        # Service doesn't exist or isn't running - clean up and create fresh
+        sprite-env services stop spritesync > /dev/null 2>&1 || true
+        sleep 1
+        sprite-env services delete spritesync > /dev/null 2>&1 || true
+        sleep 2
+
         sprite-env services create spritesync \
             --cmd "$INSTALL_DIR/spritesync" \
             --args "serve" \
             --needs syncthing \
-            --no-stream 2>&1 || true
+            --no-stream > /dev/null 2>&1 || true
 
         # Verify service is actually running
         sleep 3
