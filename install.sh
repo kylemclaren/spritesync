@@ -337,38 +337,47 @@ EOF
     fi
 }
 
+# Check if sprite-env has stop/start commands
+sprite_env_has_stop() {
+    sprite-env services --help 2>&1 | grep -q "stop <name>"
+}
+
 # Set up Syncthing as a service
 setup_syncthing_service() {
     if is_sprite; then
         substep "Creating syncthing service..."
 
-        # Check if service already exists (any state)
-        if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "syncthing")' > /dev/null 2>&1; then
-            # Service exists - just restart it to pick up any config/binary changes
-            sprite-env services stop syncthing > /dev/null 2>&1 || true
-            sleep 1
-            sprite-env services start syncthing > /dev/null 2>&1 || true
-            sleep 2
-            if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "syncthing" and .state.status == "running")' > /dev/null 2>&1; then
-                info "syncthing service restarted"
-                return 0
-            fi
-            # If restart failed, continue to try creating fresh
-            warn "syncthing restart failed, recreating..."
-            sprite-env services delete syncthing > /dev/null 2>&1 || true
-            sleep 2
-        fi
-
-        # Service doesn't exist - create it
         local syncthing_path=$(which syncthing)
         if [ -z "$syncthing_path" ]; then
             error "syncthing not found in PATH"
         fi
 
+        # Check if service already exists (any state)
+        if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "syncthing")' > /dev/null 2>&1; then
+            if sprite_env_has_stop; then
+                # New sprite-env: use stop/start
+                sprite-env services stop syncthing > /dev/null 2>&1 || true
+                sleep 1
+                sprite-env services start syncthing > /dev/null 2>&1 || true
+                sleep 2
+                if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "syncthing" and .state.status == "running")' > /dev/null 2>&1; then
+                    info "syncthing service restarted"
+                    return 0
+                fi
+            else
+                # Old sprite-env: use signal + delete/create
+                sprite-env services signal syncthing TERM > /dev/null 2>&1 || true
+                sleep 2
+            fi
+            # Delete and recreate
+            sprite-env services delete syncthing > /dev/null 2>&1 || true
+            sleep 2
+        fi
+
+        # Create the service (without --needs for compatibility, tailscaled should already be running)
         sprite-env services create syncthing \
             --cmd "$syncthing_path" \
             --args "serve,--no-browser,--no-default-folder,--config=$SYNCTHING_CONFIG_DIR,--data=$SYNCTHING_CONFIG_DIR" \
-            --needs tailscaled \
             --no-stream > /dev/null 2>&1 || true
 
         # Verify service is actually running
@@ -419,26 +428,30 @@ setup_spritesync_service() {
 
         # Check if service already exists (any state)
         if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "spritesync")' > /dev/null 2>&1; then
-            # Service exists - just restart it to use new binary
-            sprite-env services stop spritesync > /dev/null 2>&1 || true
-            sleep 1
-            sprite-env services start spritesync > /dev/null 2>&1 || true
-            sleep 2
-            if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "spritesync" and .state.status == "running")' > /dev/null 2>&1; then
-                info "spritesync discovery service restarted"
-                return 0
+            if sprite_env_has_stop; then
+                # New sprite-env: use stop/start
+                sprite-env services stop spritesync > /dev/null 2>&1 || true
+                sleep 1
+                sprite-env services start spritesync > /dev/null 2>&1 || true
+                sleep 2
+                if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "spritesync" and .state.status == "running")' > /dev/null 2>&1; then
+                    info "spritesync discovery service restarted"
+                    return 0
+                fi
+            else
+                # Old sprite-env: use signal + delete/create
+                sprite-env services signal spritesync TERM > /dev/null 2>&1 || true
+                sleep 2
             fi
-            # If restart failed, continue to try creating fresh
-            warn "spritesync restart failed, recreating..."
+            # Delete and recreate
             sprite-env services delete spritesync > /dev/null 2>&1 || true
             sleep 2
         fi
 
-        # Service doesn't exist - create it
+        # Create the service (without --needs for compatibility, syncthing should already be running)
         sprite-env services create spritesync \
             --cmd "$INSTALL_DIR/spritesync" \
             --args "serve" \
-            --needs syncthing \
             --no-stream > /dev/null 2>&1 || true
 
         # Verify service is actually running
