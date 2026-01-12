@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -90,6 +91,10 @@ func main() {
 		cmdPair(os.Args[2:])
 	case "devices":
 		cmdDevices(os.Args[2:])
+	case "sync":
+		cmdSync(os.Args[2:])
+	case "unsync":
+		cmdUnsync(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -113,6 +118,8 @@ func printUsage() {
 	fmt.Println("  status     Show folder sync status")
 	fmt.Println("  pair       Pair with another device")
 	fmt.Println("  devices    List paired devices")
+	fmt.Println("  sync       Sync a directory with another device")
+	fmt.Println("  unsync     Remove a directory from sync")
 	fmt.Println("  version    Print version")
 	fmt.Println("  help       Show this help")
 	fmt.Println()
@@ -668,4 +675,240 @@ func waitForPairFile(inboxDir string, timeout time.Duration) (deviceID, hostname
 	}
 
 	return "", "", fmt.Errorf("timeout waiting for pairing file")
+}
+
+func cmdSync(args []string) {
+	fs := flag.NewFlagSet("sync", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println("Usage: spritesync sync <directory> <device>")
+		fmt.Println()
+		fmt.Println("Sync a directory with another device.")
+		fmt.Println("Creates a shared folder in Syncthing between this device and the target.")
+		fmt.Println()
+		fmt.Println("The folder ID is deterministic based on the directory path and hostname,")
+		fmt.Println("so the same sync can be re-established after reconnection.")
+		fmt.Println()
+		fmt.Println("Example:")
+		fmt.Println("  spritesync sync ~/projects my-other-sprite")
+	}
+	fs.Parse(args)
+
+	if fs.NArg() < 2 {
+		fmt.Fprintln(os.Stderr, "Error: directory and device required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	directory := fs.Arg(0)
+	targetDevice := fs.Arg(1)
+
+	// Expand ~ to home directory
+	if strings.HasPrefix(directory, "~") {
+		home := os.Getenv("HOME")
+		directory = filepath.Join(home, directory[1:])
+	}
+
+	// Get absolute path
+	absPath, err := filepath.Abs(directory)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving directory path: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check if directory exists
+	info, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Error: directory does not exist: %s\n", absPath)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Error accessing directory: %v\n", err)
+		os.Exit(1)
+	}
+	if !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "Error: %s is not a directory\n", absPath)
+		os.Exit(1)
+	}
+
+	// Get our hostname for deterministic folder ID
+	myHostname, err := getTailscaleHostname()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting hostname: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Generate deterministic folder ID from path and hostnames
+	// Sort hostnames to ensure same ID regardless of which device initiates
+	folderID := generateFolderID(absPath, myHostname, targetDevice)
+
+	// Get the directory name for label
+	folderLabel := filepath.Base(absPath)
+
+	// Find the target device ID from paired devices
+	targetDeviceID, err := getDeviceIDByName(targetDevice)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: device '%s' not found. Have you paired with it?\n", targetDevice)
+		fmt.Fprintln(os.Stderr, "Use 'spritesync pair <device>' first to pair.")
+		os.Exit(1)
+	}
+
+	// Add the folder to Syncthing
+	if err := addSyncthingFolder(folderID, folderLabel, absPath, targetDeviceID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error adding folder to Syncthing: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Syncing %s with %s\n", absPath, targetDevice)
+	fmt.Printf("Folder ID: %s\n", folderID)
+	fmt.Println()
+	fmt.Println("The remote device will auto-accept this folder if autoAcceptFolders is enabled.")
+	fmt.Println("Use 'spritesync status' to check sync progress.")
+}
+
+func cmdUnsync(args []string) {
+	fs := flag.NewFlagSet("unsync", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println("Usage: spritesync unsync <directory>")
+		fmt.Println()
+		fmt.Println("Remove a directory from sync.")
+		fmt.Println("This removes the folder from Syncthing but does not delete any files.")
+		fmt.Println()
+		fmt.Println("Example:")
+		fmt.Println("  spritesync unsync ~/projects")
+	}
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "Error: directory required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	directory := fs.Arg(0)
+
+	// Expand ~ to home directory
+	if strings.HasPrefix(directory, "~") {
+		home := os.Getenv("HOME")
+		directory = filepath.Join(home, directory[1:])
+	}
+
+	// Get absolute path
+	absPath, err := filepath.Abs(directory)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving directory path: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Find folder in Syncthing config by path
+	folders, err := getSyncthingFolders()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting folders: %v\n", err)
+		os.Exit(1)
+	}
+
+	var folderID string
+	for _, f := range folders {
+		if f.Path == absPath {
+			folderID = f.ID
+			break
+		}
+	}
+
+	if folderID == "" {
+		fmt.Fprintf(os.Stderr, "Error: directory %s is not being synced\n", absPath)
+		os.Exit(1)
+	}
+
+	// Remove the folder from Syncthing
+	if err := removeSyncthingFolder(folderID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error removing folder from Syncthing: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Stopped syncing %s\n", absPath)
+	fmt.Println("Files have not been deleted.")
+}
+
+// generateFolderID creates a deterministic folder ID from path and hostnames
+// The ID is the same regardless of which device initiates the sync
+func generateFolderID(path, hostname1, hostname2 string) string {
+	// Sort hostnames to ensure deterministic ID
+	hosts := []string{hostname1, hostname2}
+	if hosts[0] > hosts[1] {
+		hosts[0], hosts[1] = hosts[1], hosts[0]
+	}
+
+	// Create hash from sorted hostnames and path
+	input := fmt.Sprintf("%s:%s:%s", path, hosts[0], hosts[1])
+	hash := sha256.Sum256([]byte(input))
+	// Use first 8 bytes for a shorter but still unique ID
+	return fmt.Sprintf("spritesync-%x", hash[:8])
+}
+
+// getDeviceIDByName looks up a device ID by its name
+func getDeviceIDByName(name string) (string, error) {
+	devices, err := getSyncthingDevices()
+	if err != nil {
+		return "", err
+	}
+
+	// Check exact match first
+	for _, d := range devices {
+		if d.Name == name {
+			return d.ID, nil
+		}
+	}
+
+	// Check case-insensitive match
+	nameLower := strings.ToLower(name)
+	for _, d := range devices {
+		if strings.ToLower(d.Name) == nameLower {
+			return d.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("device not found: %s", name)
+}
+
+// addSyncthingFolder adds a folder to Syncthing and shares it with a device
+func addSyncthingFolder(folderID, label, path, deviceID string) error {
+	// Use syncthing CLI to add the folder
+	cmd := exec.Command("syncthing", "cli", "config", "folders", "add",
+		"--id", folderID,
+		"--label", label,
+		"--path", path,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Folder might already exist
+		if !strings.Contains(string(output), "already exists") {
+			return fmt.Errorf("failed to add folder: %s", string(output))
+		}
+	}
+
+	// Share the folder with the device
+	cmd = exec.Command("syncthing", "cli", "config", "folders", folderID, "devices", "add",
+		"--device-id", deviceID,
+	)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		// Device might already be shared
+		if !strings.Contains(string(output), "already exists") {
+			return fmt.Errorf("failed to share folder with device: %s", string(output))
+		}
+	}
+
+	return nil
+}
+
+// removeSyncthingFolder removes a folder from Syncthing
+func removeSyncthingFolder(folderID string) error {
+	cmd := exec.Command("syncthing", "cli", "config", "folders", "remove",
+		"--id", folderID,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to remove folder: %s", string(output))
+	}
+	return nil
 }
