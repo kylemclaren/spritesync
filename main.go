@@ -23,6 +23,56 @@ import (
 
 var version = "dev"
 
+// SyncGroup represents a named sync group that can be shared across devices
+type SyncGroup struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	FolderID  string `json:"folder_id"`
+	CreatedAt string `json:"created_at"`
+}
+
+// SyncGroupsConfig holds all sync groups for this device
+type SyncGroupsConfig struct {
+	Groups []SyncGroup `json:"groups"`
+}
+
+func getSyncGroupsPath() string {
+	return filepath.Join(os.Getenv("HOME"), ".config", "spritesync", "groups.json")
+}
+
+func loadSyncGroups() (*SyncGroupsConfig, error) {
+	path := getSyncGroupsPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &SyncGroupsConfig{Groups: []SyncGroup{}}, nil
+		}
+		return nil, err
+	}
+	var config SyncGroupsConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+func saveSyncGroups(config *SyncGroupsConfig) error {
+	path := getSyncGroupsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+func generateGroupFolderID(groupName string) string {
+	hash := sha256.Sum256([]byte(groupName))
+	return fmt.Sprintf("spritesync-%x", hash[:8])
+}
+
 // SyncthingConfig represents the Syncthing configuration XML
 type SyncthingConfig struct {
 	XMLName xml.Name `xml:"configuration"`
@@ -94,10 +144,16 @@ func main() {
 		cmdStatus(os.Args[2:])
 	case "devices":
 		cmdDevices(os.Args[2:])
+	case "create":
+		cmdCreate(os.Args[2:])
+	case "join":
+		cmdJoin(os.Args[2:])
 	case "sync":
 		cmdSync(os.Args[2:])
 	case "unsync":
 		cmdUnsync(os.Args[2:])
+	case "groups":
+		cmdGroups(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -115,16 +171,29 @@ func printUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  spritesync <command> [options]")
 	fmt.Println()
-	fmt.Println("Commands:")
+	fmt.Println("Mesh Sync (recommended):")
+	fmt.Println("  create     Create a named sync group")
+	fmt.Println("  join       Join an existing sync group")
+	fmt.Println("  groups     List sync groups on this device")
+	fmt.Println()
+	fmt.Println("Direct Sync:")
+	fmt.Println("  sync       Sync a directory with a specific device")
+	fmt.Println("  unsync     Remove a directory from sync")
+	fmt.Println()
+	fmt.Println("Other:")
 	fmt.Println("  serve      Run discovery service (for sprite-env/systemd)")
-	fmt.Println("  init       Initialize configuration and API key")
-	fmt.Println("  info       Show device information")
 	fmt.Println("  status     Show folder sync status")
 	fmt.Println("  devices    List spritesync devices on tailnet")
-	fmt.Println("  sync       Sync a directory with another device")
-	fmt.Println("  unsync     Remove a directory from sync")
+	fmt.Println("  info       Show device information")
 	fmt.Println("  version    Print version")
 	fmt.Println("  help       Show this help")
+	fmt.Println()
+	fmt.Println("Quick Start:")
+	fmt.Println("  # On first Sprite:")
+	fmt.Println("  spritesync create skills ~/.claude/skills")
+	fmt.Println()
+	fmt.Println("  # On every new Sprite:")
+	fmt.Println("  spritesync join skills")
 	fmt.Println()
 	fmt.Println("Use \"spritesync <command> --help\" for more information.")
 }
@@ -223,6 +292,17 @@ func cmdServe(args []string) {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
+	})
+
+	// /syncs - returns sync groups this device has
+	mux.HandleFunc("/syncs", func(w http.ResponseWriter, r *http.Request) {
+		groups, err := loadSyncGroups()
+		if err != nil {
+			http.Error(w, "Failed to load sync groups", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(groups.Groups)
 	})
 
 	// Create server
@@ -995,4 +1075,387 @@ func removeSyncthingFolder(folderID string) error {
 		return fmt.Errorf("failed to remove folder: %s", string(output))
 	}
 	return nil
+}
+
+func cmdCreate(args []string) {
+	fs := flag.NewFlagSet("create", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println("Usage: spritesync create <name> <directory>")
+		fmt.Println()
+		fmt.Println("Create a named sync group that other devices can join.")
+		fmt.Println("All devices that join the same group will sync in a mesh.")
+		fmt.Println()
+		fmt.Println("Example:")
+		fmt.Println("  spritesync create skills ~/.claude/skills")
+		fmt.Println()
+		fmt.Println("Then on other devices:")
+		fmt.Println("  spritesync join skills")
+	}
+	fs.Parse(args)
+
+	if fs.NArg() < 2 {
+		fmt.Fprintln(os.Stderr, "Error: name and directory required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	groupName := fs.Arg(0)
+	directory := fs.Arg(1)
+
+	// Validate group name (alphanumeric and dashes only)
+	for _, c := range groupName {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			fmt.Fprintf(os.Stderr, "Error: group name can only contain letters, numbers, dashes, and underscores\n")
+			os.Exit(1)
+		}
+	}
+
+	// Expand ~ to home directory
+	if strings.HasPrefix(directory, "~") {
+		home := os.Getenv("HOME")
+		directory = filepath.Join(home, directory[1:])
+	}
+
+	// Get absolute path
+	absPath, err := filepath.Abs(directory)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving directory path: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check if directory exists, create if not
+	info, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("Creating directory %s...\n", absPath)
+			if err := os.MkdirAll(absPath, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "Error creating directory: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Error accessing directory: %v\n", err)
+			os.Exit(1)
+		}
+	} else if !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "Error: %s is not a directory\n", absPath)
+		os.Exit(1)
+	}
+
+	// Check if group already exists locally
+	groups, err := loadSyncGroups()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading sync groups: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, g := range groups.Groups {
+		if g.Name == groupName {
+			fmt.Fprintf(os.Stderr, "Error: group '%s' already exists on this device\n", groupName)
+			fmt.Fprintf(os.Stderr, "Path: %s\n", g.Path)
+			os.Exit(1)
+		}
+	}
+
+	// Generate folder ID from group name
+	folderID := generateGroupFolderID(groupName)
+
+	// Create the folder in Syncthing
+	fmt.Printf("Creating sync group '%s'...\n", groupName)
+	cmd := exec.Command("syncthing", "cli", "config", "folders", "add",
+		"--id", folderID,
+		"--label", groupName,
+		"--path", absPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if !strings.Contains(string(output), "already exists") {
+			fmt.Fprintf(os.Stderr, "Error creating folder in Syncthing: %s\n", string(output))
+			os.Exit(1)
+		}
+	}
+
+	// Save group to local config
+	group := SyncGroup{
+		Name:      groupName,
+		Path:      absPath,
+		FolderID:  folderID,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	groups.Groups = append(groups.Groups, group)
+	if err := saveSyncGroups(groups); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving sync groups: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	fmt.Printf("Created sync group: %s\n", groupName)
+	fmt.Printf("  Path:      %s\n", absPath)
+	fmt.Printf("  Folder ID: %s\n", folderID)
+	fmt.Println()
+	fmt.Println("Other devices can now join with:")
+	fmt.Printf("  spritesync join %s\n", groupName)
+}
+
+func cmdJoin(args []string) {
+	fs := flag.NewFlagSet("join", flag.ExitOnError)
+	pathFlag := fs.String("path", "", "Override the local path (default: same as creator)")
+	fs.Usage = func() {
+		fmt.Println("Usage: spritesync join <name> [--path <directory>]")
+		fmt.Println()
+		fmt.Println("Join an existing sync group created on another device.")
+		fmt.Println("Automatically discovers the group and syncs with all members.")
+		fmt.Println()
+		fmt.Println("Options:")
+		fmt.Println("  --path    Use a different local path than the group creator")
+		fmt.Println()
+		fmt.Println("Example:")
+		fmt.Println("  spritesync join skills")
+		fmt.Println("  spritesync join skills --path ~/my-skills")
+	}
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "Error: group name required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	groupName := fs.Arg(0)
+
+	// Check if we already have this group
+	groups, err := loadSyncGroups()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading sync groups: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, g := range groups.Groups {
+		if g.Name == groupName {
+			fmt.Fprintf(os.Stderr, "Error: already a member of group '%s'\n", groupName)
+			fmt.Fprintf(os.Stderr, "Path: %s\n", g.Path)
+			os.Exit(1)
+		}
+	}
+
+	// Discover devices and find one with this group
+	fmt.Printf("Searching for group '%s' on tailnet...\n", groupName)
+
+	devices, err := discoverAllDevices()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error discovering devices: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(devices) == 0 {
+		fmt.Fprintln(os.Stderr, "Error: no spritesync devices found on tailnet")
+		os.Exit(1)
+	}
+
+	// Query each device for the group
+	var foundGroup *SyncGroup
+	var foundDevice *DiscoveredDevice
+
+	for _, device := range devices {
+		deviceGroups, err := getDeviceSyncGroups(device)
+		if err != nil {
+			continue
+		}
+		for _, g := range deviceGroups {
+			if g.Name == groupName {
+				foundGroup = &g
+				foundDevice = &device
+				break
+			}
+		}
+		if foundGroup != nil {
+			break
+		}
+	}
+
+	if foundGroup == nil {
+		fmt.Fprintf(os.Stderr, "Error: group '%s' not found on any device\n", groupName)
+		fmt.Fprintln(os.Stderr, "Make sure another device has created this group with:")
+		fmt.Fprintf(os.Stderr, "  spritesync create %s <directory>\n", groupName)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Found group '%s' on %s\n", groupName, foundDevice.Hostname)
+
+	// Determine local path
+	localPath := foundGroup.Path
+	if *pathFlag != "" {
+		if strings.HasPrefix(*pathFlag, "~") {
+			home := os.Getenv("HOME")
+			localPath = filepath.Join(home, (*pathFlag)[1:])
+		} else {
+			localPath, _ = filepath.Abs(*pathFlag)
+		}
+	}
+
+	// Create directory if it doesn't exist
+	if _, err := os.Stat(localPath); os.IsNotExist(err) {
+		fmt.Printf("Creating directory %s...\n", localPath)
+		if err := os.MkdirAll(localPath, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating directory: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Add the founding device to Syncthing
+	fmt.Printf("Adding device %s...\n", foundDevice.Hostname)
+	if err := addSyncthingDevice(foundDevice.DeviceID, foundDevice.Hostname, foundDevice.IP, true); err != nil {
+		fmt.Fprintf(os.Stderr, "Error adding device: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Create the folder in Syncthing with the same folder ID
+	fmt.Printf("Creating sync folder...\n")
+	cmd := exec.Command("syncthing", "cli", "config", "folders", "add",
+		"--id", foundGroup.FolderID,
+		"--label", groupName,
+		"--path", localPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if !strings.Contains(string(output), "already exists") {
+			fmt.Fprintf(os.Stderr, "Error creating folder: %s\n", string(output))
+			os.Exit(1)
+		}
+	}
+
+	// Share the folder with the founding device
+	cmd = exec.Command("syncthing", "cli", "config", "folders", foundGroup.FolderID, "devices", "add",
+		"--device-id", foundDevice.DeviceID,
+	)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		if !strings.Contains(string(output), "already exists") {
+			fmt.Fprintf(os.Stderr, "Error sharing folder: %s\n", string(output))
+			os.Exit(1)
+		}
+	}
+
+	// Now discover and add ALL devices that have this group
+	fmt.Println("Connecting to other group members...")
+	memberCount := 1 // counting the first device we found
+
+	for _, device := range devices {
+		if device.DeviceID == foundDevice.DeviceID {
+			continue // already added
+		}
+
+		deviceGroups, err := getDeviceSyncGroups(device)
+		if err != nil {
+			continue
+		}
+
+		hasGroup := false
+		for _, g := range deviceGroups {
+			if g.Name == groupName {
+				hasGroup = true
+				break
+			}
+		}
+
+		if hasGroup {
+			// Add this device too
+			if err := addSyncthingDevice(device.DeviceID, device.Hostname, device.IP, true); err == nil {
+				cmd = exec.Command("syncthing", "cli", "config", "folders", foundGroup.FolderID, "devices", "add",
+					"--device-id", device.DeviceID,
+				)
+				cmd.Run()
+				memberCount++
+				fmt.Printf("  + %s\n", device.Hostname)
+			}
+		}
+	}
+
+	// Save group to local config
+	group := SyncGroup{
+		Name:      groupName,
+		Path:      localPath,
+		FolderID:  foundGroup.FolderID,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	groups.Groups = append(groups.Groups, group)
+	if err := saveSyncGroups(groups); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving sync groups: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	fmt.Printf("Joined sync group: %s\n", groupName)
+	fmt.Printf("  Path:    %s\n", localPath)
+	fmt.Printf("  Members: %d device(s)\n", memberCount)
+	fmt.Println()
+	fmt.Println("Files will sync automatically. Use 'spritesync status' to check progress.")
+}
+
+// getDeviceSyncGroups queries a device for its sync groups
+func getDeviceSyncGroups(device DiscoveredDevice) ([]SyncGroup, error) {
+	url := fmt.Sprintf("http://%s:%d/syncs", device.IP, discoveryPort)
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	var groups []SyncGroup
+	if err := json.NewDecoder(resp.Body).Decode(&groups); err != nil {
+		return nil, err
+	}
+
+	return groups, nil
+}
+
+func cmdGroups(args []string) {
+	fs := flag.NewFlagSet("groups", flag.ExitOnError)
+	jsonOutput := fs.Bool("json", false, "Output in JSON format")
+	fs.Usage = func() {
+		fmt.Println("Usage: spritesync groups [--json]")
+		fmt.Println()
+		fmt.Println("List sync groups on this device.")
+		fmt.Println()
+		fmt.Println("Options:")
+		fmt.Println("  --json    Output in JSON format")
+	}
+	fs.Parse(args)
+
+	groups, err := loadSyncGroups()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading sync groups: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOutput {
+		jsonBytes, _ := json.MarshalIndent(groups.Groups, "", "  ")
+		fmt.Println(string(jsonBytes))
+		return
+	}
+
+	if len(groups.Groups) == 0 {
+		fmt.Println("No sync groups configured.")
+		fmt.Println()
+		fmt.Println("Create one with:")
+		fmt.Println("  spritesync create <name> <directory>")
+		fmt.Println()
+		fmt.Println("Or join an existing group:")
+		fmt.Println("  spritesync join <name>")
+		return
+	}
+
+	fmt.Println("Sync Groups:")
+	fmt.Println()
+	for _, g := range groups.Groups {
+		fmt.Printf("  %s\n", g.Name)
+		fmt.Printf("    Path:      %s\n", g.Path)
+		fmt.Printf("    Folder ID: %s\n", g.FolderID)
+		fmt.Println()
+	}
 }
