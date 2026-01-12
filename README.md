@@ -4,74 +4,83 @@ Sync directories between [Sprites](https://sprites.dev) using [Syncthing](https:
 
 ## Features
 
-- **Zero-config pairing** - Devices auto-discover each other on the tailnet
-- Secure peer-to-peer directory sync over Tailscale
-- Tailnet membership = trust (no manual device ID exchange)
-- Deterministic folder IDs for reliable reconnection
+- **Mesh sync** - All devices sync with each other, no single point of failure
+- **Zero-config** - `create` once, `join` from anywhere on your tailnet
+- **Auto-discovery** - Devices find each other automatically
+- Secure peer-to-peer sync over Tailscale (no public relays)
 - Works with systemd or Sprite service managers
 
-## Quick Install
+## Quick Start
+
+### Install
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/kylemclaren/spritesync/main/install.sh)
 ```
 
-The installer will:
-1. Install Syncthing and Tailscale
-2. Configure Syncthing to listen only on your Tailscale IP
-3. Disable global/local discovery and relays for privacy
-4. Set up Syncthing and spritesync as persistent services
-5. Install the Claude Code skill (on Sprite environments)
+### Create a Sync Group (first Sprite)
+
+```bash
+spritesync create skills ~/.claude/skills
+```
+
+### Join from Other Sprites
+
+```bash
+spritesync join skills
+```
+
+That's it. All devices with the same group sync in a mesh.
 
 ## Usage
 
-### Sync a Directory
+### Mesh Sync (Recommended)
+
+Create a named sync group that any device can join:
 
 ```bash
-# On Sprite A
+# On first Sprite - create the group
+spritesync create myproject ~/code/myproject
+
+# On every other Sprite - just join
+spritesync join myproject
+```
+
+The `join` command:
+1. Discovers the group on the tailnet
+2. Connects to ALL existing members
+3. Starts syncing immediately
+
+### Direct Sync
+
+For one-off syncs between two specific devices:
+
+```bash
 spritesync sync ~/projects sprite-b
 ```
 
-That's it. spritesync automatically:
-1. Discovers sprite-b on the tailnet
-2. Exchanges Syncthing device IDs
-3. Creates the shared folder
-4. sprite-b auto-accepts the folder
-
-### Discover Devices
+### Other Commands
 
 ```bash
-spritesync devices
+spritesync groups              # List sync groups on this device
+spritesync status              # Show folder sync status
+spritesync devices             # Discover devices on tailnet
+spritesync unsync ~/projects   # Stop syncing a directory
 ```
-
-Scans the tailnet for other devices running spritesync.
-
-### Check Status
-
-```bash
-spritesync status
-spritesync status --json
-```
-
-### Stop Syncing
-
-```bash
-spritesync unsync ~/projects
-```
-
-Files are not deleted, only removed from sync.
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
-| `spritesync serve` | Run discovery service (managed by installer) |
-| `spritesync sync <dir> <device>` | Sync a directory with another device |
+| `spritesync create <name> <dir>` | Create a named sync group |
+| `spritesync join <name>` | Join an existing sync group |
+| `spritesync groups` | List sync groups on this device |
+| `spritesync sync <dir> <device>` | Direct sync with a specific device |
 | `spritesync unsync <dir>` | Stop syncing a directory |
 | `spritesync status [--json]` | Show folder sync status |
 | `spritesync devices [--json]` | Discover spritesync devices on tailnet |
 | `spritesync info` | Show this device's ID and hostname |
-| `spritesync version` | Print version |
+| `spritesync serve` | Run discovery service (managed by installer) |
 
 ## How It Works
 
@@ -96,7 +105,7 @@ Files are not deleted, only removed from sync.
            └─────────────┘
 ```
 
-1. **Discovery service** (port 8385) - Allows devices to find each other
+1. **Discovery service** (port 8385) - Devices advertise sync groups and find each other
 2. **Syncthing** handles actual file synchronization
 3. **Tailscale** provides the secure network layer
 
@@ -117,7 +126,7 @@ The installer sets up two services:
 | Service | Port | Purpose |
 |---------|------|---------|
 | syncthing | 22000 | File synchronization (Tailscale IP only) |
-| spritesync | 8385 | Device discovery (Tailscale IP only) |
+| spritesync | 8385 | Device/group discovery (Tailscale IP only) |
 
 ### Sprite Environment
 
@@ -139,23 +148,6 @@ systemctl status spritesync@$USER
 git clone https://github.com/kylemclaren/spritesync.git
 cd spritesync
 go build -o spritesync .
-```
-
-## Manual Installation
-
-Download the binary for your platform from [Releases](https://github.com/kylemclaren/spritesync/releases):
-
-```bash
-# Linux amd64
-curl -fsSL https://github.com/kylemclaren/spritesync/releases/latest/download/spritesync-linux-amd64 -o spritesync
-chmod +x spritesync
-sudo mv spritesync /usr/local/bin/
-```
-
-Then run the discovery service:
-
-```bash
-spritesync serve
 ```
 
 ## License
