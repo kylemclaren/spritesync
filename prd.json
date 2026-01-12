@@ -74,7 +74,7 @@
         "README shows complete workflow example"
       ],
       "priority": 7,
-      "passes": false
+      "passes": true
     }
   ]
 }

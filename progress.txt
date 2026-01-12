@@ -93,3 +93,17 @@ Files changed:
 - Path expansion: Handle ~ prefix by joining with $HOME
 - Folder lookup by path: Iterate getSyncthingFolders() and match Path field
 ---
+
+## 2026-01-12 - US-007
+**README documentation**
+
+Files changed:
+- README.md (created)
+
+**Learnings:**
+- README structure: Quick install -> Usage workflow -> CLI reference -> Build from source
+- Include curl one-liner for easy installation
+- Show complete workflow example early (both devices pairing + syncing)
+- Document all CLI commands with examples and flag descriptions
+- Reference spritedrop README.md for consistent style
+---
