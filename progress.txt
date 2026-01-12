@@ -8,6 +8,7 @@ Started: 2026-01-12
 - Syncthing config: XML at ~/.config/syncthing/config.xml, API at 127.0.0.1:8384
 - Syncthing API key: Read from config.xml GUI.apikey element
 - Tailscale hostname: `tailscale status --json` -> .Self.HostName
+- Taildrop file exchange: `tailscale file cp <file> <target>:` and `tailscale file get <dir>`
 
 ## Key Files
 - main.go - CLI entry point with version flag and subcommands
@@ -60,4 +61,19 @@ Files changed:
 - XML parsing: Use `xml:"tagname"` for elements, `xml:"name,attr"` for attributes
 - API requests to Syncthing require X-API-Key header
 - flag.NewFlagSet allows subcommand-specific flags
+---
+
+## 2026-01-12 - US-005
+**Device pairing via Taildrop**
+
+Files changed:
+- main.go (added pair and devices commands)
+
+**Learnings:**
+- Taildrop send: `tailscale file cp <file> <device>:`
+- Taildrop receive: `tailscale file get --wait=1s <dir>` for polling
+- Syncthing add device: `syncthing cli config devices add --device-id <id> --name <name>`
+- Syncthing auto-accept: `syncthing cli config devices <id> auto-accept-folders set true`
+- Pairing protocol: Exchange device ID + hostname in text file via Taildrop
+- Both devices must run pair command simultaneously for bi-directional exchange
 ---
