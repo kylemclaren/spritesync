@@ -1,0 +1,63 @@
+# Ralph Progress Log
+Started: 2026-01-12
+
+## Codebase Patterns
+- Go version flag: Use `-ldflags="-X main.version=$VERSION"` to inject version at build time
+- Reference /home/sprite/spritedrop for patterns (install.sh, release.yml, README.md)
+- CLI subcommands: Use flag.NewFlagSet for each subcommand
+- Syncthing config: XML at ~/.config/syncthing/config.xml, API at 127.0.0.1:8384
+- Syncthing API key: Read from config.xml GUI.apikey element
+- Tailscale hostname: `tailscale status --json` -> .Self.HostName
+
+## Key Files
+- main.go - CLI entry point with version flag and subcommands
+- .github/workflows/release.yml - Multi-platform build pipeline
+- install.sh - Installer for Syncthing + Tailscale setup
+
+---
+
+## 2026-01-12 - US-002
+**Repository setup with Go module and GitHub Actions**
+
+Files changed:
+- go.mod (already existed, verified correct)
+- main.go (created)
+- .github/workflows/release.yml (created)
+- .gitignore (created)
+
+**Learnings:**
+- go.mod was already present with correct module name
+- Version injection via ldflags works: `go build -ldflags="-X main.version=v1.0.0"`
+- Release workflow builds for linux/darwin amd64/arm64 matrix
+---
+
+## 2026-01-12 - US-003
+**Install script with Syncthing and Tailscale setup**
+
+Files changed:
+- install.sh (created)
+
+**Learnings:**
+- Syncthing apt repo: Add key via `curl -fsSL https://syncthing.net/release-key.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/syncthing-archive-keyring.gpg`
+- Syncthing CLI for config: `syncthing cli config options listen-addresses set "tcp://<ip>:22000"`
+- Disable discovery: `syncthing cli config options global-announce-enabled set false`
+- sprite-env service dependency: use `--needs tailscaled`
+- systemd service dependency: use `After=tailscaled.service` and `Wants=tailscaled.service`
+- Generate initial config with: `syncthing generate --config=<dir>`
+---
+
+## 2026-01-12 - US-004
+**Core CLI commands: init, info, status**
+
+Files changed:
+- main.go (updated with CLI subcommands)
+- prd.json (created to track progress)
+- progress.txt (created)
+
+**Learnings:**
+- Syncthing device ID can be retrieved via: CLI (`syncthing cli show system`), REST API (`/rest/system/status`), or config.xml
+- Tailscale hostname: `tailscale status --json` returns .Self.HostName
+- XML parsing: Use `xml:"tagname"` for elements, `xml:"name,attr"` for attributes
+- API requests to Syncthing require X-API-Key header
+- flag.NewFlagSet allows subcommand-specific flags
+---
