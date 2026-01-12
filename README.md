@@ -1,5 +1,10 @@
 # spritesync
 
+> **Warning**: This is experimental software. Use at your own risk.
+> - May corrupt files or directories if sync conflicts occur
+> - May prevent Sprites from hibernating (services keep running)
+> - Not recommended for critical data without backups
+
 Sync directories between [Sprites](https://sprites.dev) using [Syncthing](https://syncthing.net) over [Tailscale](https://tailscale.com).
 
 ## Features
