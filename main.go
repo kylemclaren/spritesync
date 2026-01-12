@@ -369,6 +369,7 @@ func discoverAllDevices() ([]DiscoveredDevice, error) {
 }
 
 // discoverDeviceByName finds a specific device on the tailnet
+// If multiple devices have the same hostname, returns the first one that responds
 func discoverDeviceByName(name string) (*DiscoveredDevice, error) {
 	peers, err := getTailnetPeers()
 	if err != nil {
@@ -376,13 +377,25 @@ func discoverDeviceByName(name string) (*DiscoveredDevice, error) {
 	}
 
 	nameLower := strings.ToLower(name)
+	var lastErr error
+	var matchCount int
+
 	for _, peer := range peers {
 		if strings.ToLower(peer.Hostname) == nameLower {
-			return discoverDevice(peer)
+			matchCount++
+			device, err := discoverDevice(peer)
+			if err == nil {
+				return device, nil
+			}
+			lastErr = err
 		}
 	}
 
-	return nil, fmt.Errorf("device '%s' not found on tailnet", name)
+	if matchCount == 0 {
+		return nil, fmt.Errorf("device '%s' not found on tailnet", name)
+	}
+
+	return nil, fmt.Errorf("device '%s' found but not responding: %v", name, lastErr)
 }
 
 func cmdInfo(args []string) {
