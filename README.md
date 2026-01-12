@@ -1,6 +1,7 @@
 # spritesync
 
-> **Warning**: This is experimental software. Use at your own risk.
+> [!WARNING]
+> This is experimental software. Use at your own risk.
 > - May corrupt files or directories if sync conflicts occur
 > - May prevent Sprites from hibernating (services keep running)
 > - Not recommended for critical data without backups
