@@ -710,7 +710,7 @@ func getSyncthingDevices() ([]Device, error) {
 	return config.Devices, nil
 }
 
-func addSyncthingDevice(deviceID, name string, autoAccept bool) error {
+func addSyncthingDevice(deviceID, name, address string, autoAccept bool) error {
 	// Use syncthing CLI to add the device
 	cmd := exec.Command("syncthing", "cli", "config", "devices", "add",
 		"--device-id", deviceID,
@@ -725,6 +725,18 @@ func addSyncthingDevice(deviceID, name string, autoAccept bool) error {
 			cmd.Run()
 		} else {
 			return fmt.Errorf("failed to add device: %s", string(output))
+		}
+	}
+
+	// Set the device address (critical for connectivity when discovery is disabled)
+	if address != "" {
+		tcpAddr := fmt.Sprintf("tcp://%s:22000", address)
+		cmd = exec.Command("syncthing", "cli", "config", "devices", deviceID, "addresses", "add", tcpAddr)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			// Address might already exist, which is fine
+			if !strings.Contains(string(output), "already exists") {
+				return fmt.Errorf("failed to set device address: %s", string(output))
+			}
 		}
 	}
 
@@ -804,9 +816,9 @@ func cmdSync(args []string) {
 	fmt.Printf("Found %s (ID: %s...%s)\n", discovered.Hostname,
 		discovered.DeviceID[:7], discovered.DeviceID[len(discovered.DeviceID)-7:])
 
-	// Auto-pair: add device to Syncthing with autoAcceptFolders
-	fmt.Printf("Pairing with %s...\n", discovered.Hostname)
-	if err := addSyncthingDevice(discovered.DeviceID, discovered.Hostname, true); err != nil {
+	// Auto-pair: add device to Syncthing with autoAcceptFolders and address
+	fmt.Printf("Pairing with %s (%s)...\n", discovered.Hostname, discovered.IP)
+	if err := addSyncthingDevice(discovered.DeviceID, discovered.Hostname, discovered.IP, true); err != nil {
 		fmt.Fprintf(os.Stderr, "Error adding device: %v\n", err)
 		os.Exit(1)
 	}
