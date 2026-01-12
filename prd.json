@@ -62,7 +62,7 @@
         "spritesync unsync removes the folder from Syncthing config"
       ],
       "priority": 6,
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-007",

@@ -9,6 +9,7 @@ Started: 2026-01-12
 - Syncthing API key: Read from config.xml GUI.apikey element
 - Tailscale hostname: `tailscale status --json` -> .Self.HostName
 - Taildrop file exchange: `tailscale file cp <file> <target>:` and `tailscale file get <dir>`
+- Deterministic IDs: Sort inputs alphabetically before hashing for consistent IDs regardless of order
 
 ## Key Files
 - main.go - CLI entry point with version flag and subcommands
@@ -76,4 +77,19 @@ Files changed:
 - Syncthing auto-accept: `syncthing cli config devices <id> auto-accept-folders set true`
 - Pairing protocol: Exchange device ID + hostname in text file via Taildrop
 - Both devices must run pair command simultaneously for bi-directional exchange
+---
+
+## 2026-01-12 - US-006
+**Folder sync commands: sync and unsync**
+
+Files changed:
+- main.go (added sync and unsync commands)
+
+**Learnings:**
+- Deterministic folder ID: Hash sorted hostnames + path with SHA-256, use first 8 bytes
+- Syncthing add folder: `syncthing cli config folders add --id <id> --label <label> --path <path>`
+- Syncthing share folder: `syncthing cli config folders <id> devices add --device-id <device-id>`
+- Syncthing remove folder: `syncthing cli config folders remove --id <id>`
+- Path expansion: Handle ~ prefix by joining with $HOME
+- Folder lookup by path: Iterate getSyncthingFolders() and match Path field
 ---
