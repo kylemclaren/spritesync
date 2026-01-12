@@ -1,2 +1,4 @@
 spritesync
 dist/
+.ralph/
+ralph.yaml

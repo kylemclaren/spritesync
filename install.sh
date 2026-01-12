@@ -322,6 +322,45 @@ EOF
     fi
 }
 
+# Set up spritesync discovery service
+setup_spritesync_service() {
+    if is_sprite; then
+        substep "Creating spritesync service..."
+        sprite-env services delete spritesync > /dev/null 2>&1 || true
+        sleep 1
+        sprite-env services create spritesync \
+            --cmd "$INSTALL_DIR/spritesync" \
+            --args "serve" \
+            --needs syncthing \
+            --no-stream > /dev/null 2>&1
+        info "spritesync discovery service running"
+    elif command -v systemctl &> /dev/null; then
+        substep "Creating spritesync systemd service..."
+        sudo tee /etc/systemd/system/spritesync@.service > /dev/null <<EOF
+[Unit]
+Description=spritesync discovery service for %i
+After=network.target syncthing@%i.service
+Wants=syncthing@%i.service
+
+[Service]
+Type=simple
+User=%i
+ExecStart=$INSTALL_DIR/spritesync serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        sudo systemctl daemon-reload > /dev/null 2>&1
+        sudo systemctl enable --now "spritesync@${USER}" > /dev/null 2>&1
+        info "spritesync systemd service running"
+    else
+        warn "No service manager - run manually:"
+        echo "    spritesync serve"
+    fi
+}
+
 # Get latest release version
 get_latest_version() {
     curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | \
@@ -359,12 +398,18 @@ install_skill() {
     cat > "$skill_dir/SKILL.md" << 'SKILL_EOF'
 ---
 name: spritesync
-description: Use this skill when users want to sync directories between Sprite VMs using Syncthing over Tailscale. Use for pairing devices, syncing folders, checking sync status, or managing shared directories.
+description: Use this skill when users want to sync directories between Sprite VMs using Syncthing over Tailscale. Use for syncing folders, checking sync status, discovering devices, or managing shared directories.
 ---
 
 You help manage Syncthing-based directory synchronization between Sprite VMs over Tailscale.
 
 ## Commands
+
+### Sync Directories (auto-discovers and pairs)
+```bash
+spritesync sync ~/myproject <device-name>   # Sync a directory with another device
+spritesync unsync ~/myproject               # Stop syncing a directory
+```
 
 ### Check Status
 ```bash
@@ -372,44 +417,33 @@ spritesync status        # Show sync status of all folders
 spritesync status --json # Machine-readable output
 ```
 
-### Device Info
+### Discover Devices
 ```bash
+spritesync devices       # Discover spritesync devices on the tailnet
 spritesync info          # Show this device's Syncthing ID and Tailscale hostname
-```
-
-### Pair Devices
-```bash
-spritesync pair <device-name>  # Exchange device IDs with another Sprite
-spritesync devices             # List all paired devices
-```
-
-### Sync Directories
-```bash
-spritesync sync ~/myproject <device-name>   # Share a directory with another device
-spritesync unsync ~/myproject               # Stop syncing a directory
 ```
 
 ## Quick Actions
 
 When user asks to:
+- "sync folder with X" -> Run `spritesync sync <folder> X` (auto-discovers and pairs)
 - "sync status" / "what's syncing" -> Run `spritesync status`
-- "pair with X" / "connect to X" -> Run `spritesync pair X`
-- "sync folder with X" -> Run `spritesync sync <folder> X`
 - "stop syncing" -> Run `spritesync unsync <folder>`
+- "find devices" / "list devices" -> Run `spritesync devices`
 - "show device id" -> Run `spritesync info`
-- "list paired devices" -> Run `spritesync devices`
+
+## How It Works
+
+1. Devices auto-discover each other via the spritesync discovery service (port 8385)
+2. When you run `sync`, it automatically discovers and pairs with the target
+3. No manual pairing required - tailnet membership = trust
 
 ## Troubleshooting
 
-Check Syncthing service:
+Check services:
 ```bash
-sprite-env services get syncthing  # Sprite environment
-systemctl status syncthing@$USER   # systemd
-```
-
-Check Syncthing logs:
-```bash
-journalctl -u syncthing@$USER -f   # systemd
+sprite-env services get syncthing   # Syncthing service
+sprite-env services get spritesync  # Discovery service
 ```
 
 Verify Tailscale connection:
@@ -448,25 +482,25 @@ main() {
 
     step "Installing spritesync"
     install_spritesync
+    setup_spritesync_service
     install_skill
 
     # Get device info for display
     local device_name=$(tailscale status --json 2>/dev/null | jq -r '.Self.HostName // empty' 2>/dev/null)
     device_name="${device_name:-$(hostname)}"
     local ts_ip=$(get_tailscale_ip)
-    local device_id=$(syncthing cli config devices list 2>/dev/null | head -1 || echo "unknown")
 
     echo ""
     echo -e "${BOLD}  Done!${NC}"
     echo ""
     echo -e "  ${DIM}Device:${NC}     ${BOLD}${device_name}${NC}"
     echo -e "  ${DIM}Tailscale:${NC}  ${ts_ip}"
-    echo -e "  ${DIM}Syncthing:${NC}  Listening on ${ts_ip}:22000"
+    echo -e "  ${DIM}Syncthing:${NC}  ${ts_ip}:22000"
+    echo -e "  ${DIM}Discovery:${NC}  ${ts_ip}:8385"
     echo ""
-    echo -e "  ${DIM}Next steps:${NC}"
-    echo -e "    1. Run ${BOLD}spritesync init${NC} to initialize config"
-    echo -e "    2. Run ${BOLD}spritesync pair <device>${NC} to connect devices"
-    echo -e "    3. Run ${BOLD}spritesync sync <dir> <device>${NC} to share folders"
+    echo -e "  ${DIM}Usage:${NC}"
+    echo -e "    ${BOLD}spritesync devices${NC}              # Find other spritesync devices"
+    echo -e "    ${BOLD}spritesync sync <dir> <device>${NC}  # Sync a directory"
     echo ""
 }
 

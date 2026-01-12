@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,8 +13,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -81,14 +84,14 @@ func main() {
 	}
 
 	switch cmd {
+	case "serve":
+		cmdServe(os.Args[2:])
 	case "init":
 		cmdInit(os.Args[2:])
 	case "info":
 		cmdInfo(os.Args[2:])
 	case "status":
 		cmdStatus(os.Args[2:])
-	case "pair":
-		cmdPair(os.Args[2:])
 	case "devices":
 		cmdDevices(os.Args[2:])
 	case "sync":
@@ -113,11 +116,11 @@ func printUsage() {
 	fmt.Println("  spritesync <command> [options]")
 	fmt.Println()
 	fmt.Println("Commands:")
+	fmt.Println("  serve      Run discovery service (for sprite-env/systemd)")
 	fmt.Println("  init       Initialize configuration and API key")
 	fmt.Println("  info       Show device information")
 	fmt.Println("  status     Show folder sync status")
-	fmt.Println("  pair       Pair with another device")
-	fmt.Println("  devices    List paired devices")
+	fmt.Println("  devices    List spritesync devices on tailnet")
 	fmt.Println("  sync       Sync a directory with another device")
 	fmt.Println("  unsync     Remove a directory from sync")
 	fmt.Println("  version    Print version")
@@ -168,6 +171,218 @@ func cmdInit(args []string) {
 
 	fmt.Printf("Initialized spritesync configuration at %s\n", configDir)
 	fmt.Println("API key generated and stored.")
+}
+
+const discoveryPort = 8385
+
+func cmdServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Println("Usage: spritesync serve")
+		fmt.Println()
+		fmt.Println("Run the discovery service on the Tailscale interface.")
+		fmt.Println("This allows other spritesync devices to discover and pair with this device.")
+		fmt.Println()
+		fmt.Println("The service listens on <tailscale-ip>:8385 and exposes:")
+		fmt.Println("  /id      - Returns this device's Syncthing device ID")
+		fmt.Println("  /health  - Health check endpoint")
+	}
+	fs.Parse(args)
+
+	// Get Tailscale IP
+	tsIP, err := getTailscaleIP()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting Tailscale IP: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Make sure Tailscale is running and connected.")
+		os.Exit(1)
+	}
+
+	// Get our hostname for logging
+	hostname, _ := getTailscaleHostname()
+
+	// Set up HTTP handlers
+	mux := http.NewServeMux()
+
+	// /id - returns Syncthing device ID and hostname
+	mux.HandleFunc("/id", func(w http.ResponseWriter, r *http.Request) {
+		deviceID, err := getSyncthingDeviceID()
+		if err != nil {
+			http.Error(w, "Failed to get device ID", http.StatusInternalServerError)
+			return
+		}
+		hostname, _ := getTailscaleHostname()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"device_id": deviceID,
+			"hostname":  hostname,
+		})
+	})
+
+	// /health - simple health check
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	// Create server
+	addr := fmt.Sprintf("%s:%d", tsIP, discoveryPort)
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	// Handle graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		fmt.Println("\nShutting down...")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server.Shutdown(ctx)
+	}()
+
+	fmt.Printf("spritesync discovery service starting\n")
+	fmt.Printf("  Hostname: %s\n", hostname)
+	fmt.Printf("  Listening: http://%s\n", addr)
+	fmt.Println()
+
+	if err := server.ListenAndServe(); err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// getTailscaleIP returns this device's Tailscale IP address
+func getTailscaleIP() (string, error) {
+	cmd := exec.Command("tailscale", "ip", "-4")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get Tailscale IP: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// getTailnetPeers returns all peers on the tailnet
+func getTailnetPeers() ([]TailnetPeer, error) {
+	cmd := exec.Command("tailscale", "status", "--json")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tailscale status: %w", err)
+	}
+
+	var status struct {
+		Peer map[string]struct {
+			HostName  string   `json:"HostName"`
+			TailscaleIPs []string `json:"TailscaleIPs"`
+			Online    bool     `json:"Online"`
+		} `json:"Peer"`
+	}
+	if err := json.Unmarshal(output, &status); err != nil {
+		return nil, fmt.Errorf("failed to parse tailscale status: %w", err)
+	}
+
+	var peers []TailnetPeer
+	for _, peer := range status.Peer {
+		if len(peer.TailscaleIPs) > 0 && peer.Online {
+			peers = append(peers, TailnetPeer{
+				Hostname: peer.HostName,
+				IP:       peer.TailscaleIPs[0],
+			})
+		}
+	}
+	return peers, nil
+}
+
+type TailnetPeer struct {
+	Hostname string
+	IP       string
+}
+
+// discoverDevice queries a peer for its Syncthing device ID
+func discoverDevice(peer TailnetPeer) (*DiscoveredDevice, error) {
+	url := fmt.Sprintf("http://%s:%d/id", peer.IP, discoveryPort)
+
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+	}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		DeviceID string `json:"device_id"`
+		Hostname string `json:"hostname"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return &DiscoveredDevice{
+		Hostname: result.Hostname,
+		IP:       peer.IP,
+		DeviceID: result.DeviceID,
+	}, nil
+}
+
+type DiscoveredDevice struct {
+	Hostname string
+	IP       string
+	DeviceID string
+}
+
+// discoverAllDevices scans the tailnet for spritesync devices
+func discoverAllDevices() ([]DiscoveredDevice, error) {
+	peers, err := getTailnetPeers()
+	if err != nil {
+		return nil, err
+	}
+
+	var discovered []DiscoveredDevice
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, peer := range peers {
+		wg.Add(1)
+		go func(p TailnetPeer) {
+			defer wg.Done()
+			device, err := discoverDevice(p)
+			if err == nil {
+				mu.Lock()
+				discovered = append(discovered, *device)
+				mu.Unlock()
+			}
+		}(peer)
+	}
+
+	wg.Wait()
+	return discovered, nil
+}
+
+// discoverDeviceByName finds a specific device on the tailnet
+func discoverDeviceByName(name string) (*DiscoveredDevice, error) {
+	peers, err := getTailnetPeers()
+	if err != nil {
+		return nil, err
+	}
+
+	nameLower := strings.ToLower(name)
+	for _, peer := range peers {
+		if strings.ToLower(peer.Hostname) == nameLower {
+			return discoverDevice(peer)
+		}
+	}
+
+	return nil, fmt.Errorf("device '%s' not found on tailnet", name)
 }
 
 func cmdInfo(args []string) {
@@ -411,190 +626,57 @@ func getFolderStatus(apiKey, folderID string) (*FolderStatus, error) {
 	return &status, nil
 }
 
-func cmdPair(args []string) {
-	fs := flag.NewFlagSet("pair", flag.ExitOnError)
-	timeout := fs.Duration("timeout", 5*time.Minute, "Timeout waiting for pairing response")
-	fs.Usage = func() {
-		fmt.Println("Usage: spritesync pair <device>")
-		fmt.Println()
-		fmt.Println("Pair with another device by exchanging Syncthing device IDs via Taildrop.")
-		fmt.Println()
-		fmt.Println("Options:")
-		fmt.Println("  --timeout    Timeout waiting for response (default: 5m)")
-		fmt.Println()
-		fmt.Println("Example:")
-		fmt.Println("  spritesync pair my-other-sprite")
-	}
-	fs.Parse(args)
-
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Error: device name required")
-		fs.Usage()
-		os.Exit(1)
-	}
-
-	targetDevice := fs.Arg(0)
-
-	// Get our Syncthing device ID
-	myDeviceID, err := getSyncthingDeviceID()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting Syncthing device ID: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Get our hostname for the pairing file
-	myHostname, err := getTailscaleHostname()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting hostname: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Create temp file with our device info
-	tmpDir := os.TempDir()
-	pairFile := filepath.Join(tmpDir, fmt.Sprintf("spritesync-pair-%s.txt", myHostname))
-
-	content := fmt.Sprintf("%s\n%s\n", myDeviceID, myHostname)
-	if err := os.WriteFile(pairFile, []byte(content), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing pair file: %v\n", err)
-		os.Exit(1)
-	}
-	defer os.Remove(pairFile)
-
-	fmt.Printf("Sending device ID to %s...\n", targetDevice)
-
-	// Send our device ID via Taildrop
-	cmd := exec.Command("tailscale", "file", "cp", pairFile, targetDevice+":")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error sending device ID: %v\n%s\n", err, string(output))
-		os.Exit(1)
-	}
-
-	fmt.Println("Device ID sent. Waiting for partner's device ID...")
-	fmt.Println("(The other device should also run 'spritesync pair' with your hostname)")
-
-	// Wait to receive partner's device ID
-	inboxDir := filepath.Join(tmpDir, "spritesync-inbox")
-	if err := os.MkdirAll(inboxDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating inbox directory: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Start receiving files in background
-	deadline := time.Now().Add(*timeout)
-	var partnerDeviceID, partnerHostname string
-
-	for time.Now().Before(deadline) {
-		// Check for received pairing files
-		matches, _ := filepath.Glob(filepath.Join(inboxDir, "spritesync-pair-*.txt"))
-		for _, match := range matches {
-			// Read the pairing file
-			data, err := os.ReadFile(match)
-			if err != nil {
-				continue
-			}
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			if len(lines) >= 2 {
-				partnerDeviceID = strings.TrimSpace(lines[0])
-				partnerHostname = strings.TrimSpace(lines[1])
-				// Remove the processed file
-				os.Remove(match)
-				break
-			}
-		}
-
-		if partnerDeviceID != "" {
-			break
-		}
-
-		// Try to receive files non-blocking
-		cmd := exec.Command("tailscale", "file", "get", "--wait=1s", inboxDir)
-		cmd.Run() // Ignore errors, just polling
-
-		time.Sleep(2 * time.Second)
-	}
-
-	if partnerDeviceID == "" {
-		fmt.Fprintln(os.Stderr, "Timeout waiting for partner's device ID")
-		fmt.Fprintln(os.Stderr, "Make sure the other device runs: spritesync pair "+myHostname)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Received device ID from %s\n", partnerHostname)
-
-	// Add partner device to Syncthing with autoAcceptFolders
-	if err := addSyncthingDevice(partnerDeviceID, partnerHostname, true); err != nil {
-		fmt.Fprintf(os.Stderr, "Error adding device to Syncthing: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Successfully paired with %s!\n", partnerHostname)
-	fmt.Println("Devices will auto-accept shared folders from each other.")
-}
-
 func cmdDevices(args []string) {
 	fs := flag.NewFlagSet("devices", flag.ExitOnError)
 	jsonOutput := fs.Bool("json", false, "Output in JSON format")
 	fs.Usage = func() {
 		fmt.Println("Usage: spritesync devices [--json]")
 		fmt.Println()
-		fmt.Println("List all paired devices.")
+		fmt.Println("Discover spritesync devices on the tailnet.")
 		fmt.Println()
 		fmt.Println("Options:")
 		fmt.Println("  --json    Output in JSON format")
 	}
 	fs.Parse(args)
 
-	devices, err := getSyncthingDevices()
+	fmt.Println("Scanning tailnet for spritesync devices...")
+	devices, err := discoverAllDevices()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting devices: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error discovering devices: %v\n", err)
 		os.Exit(1)
-	}
-
-	// Get our own device ID to filter it out
-	myDeviceID, _ := getSyncthingDeviceID()
-
-	// Filter out our own device
-	var pairedDevices []Device
-	for _, d := range devices {
-		if d.ID != myDeviceID {
-			pairedDevices = append(pairedDevices, d)
-		}
 	}
 
 	if *jsonOutput {
 		type DeviceOutput struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
+			Hostname string `json:"hostname"`
+			IP       string `json:"ip"`
+			DeviceID string `json:"device_id"`
 		}
 		type DevicesOutput struct {
 			Devices []DeviceOutput `json:"devices"`
 		}
 		output := DevicesOutput{Devices: []DeviceOutput{}}
-		for _, d := range pairedDevices {
+		for _, d := range devices {
 			output.Devices = append(output.Devices, DeviceOutput{
-				ID:   d.ID,
-				Name: d.Name,
+				Hostname: d.Hostname,
+				IP:       d.IP,
+				DeviceID: d.DeviceID,
 			})
 		}
 		jsonBytes, _ := json.MarshalIndent(output, "", "  ")
 		fmt.Println(string(jsonBytes))
 	} else {
-		if len(pairedDevices) == 0 {
-			fmt.Println("No paired devices.")
-			fmt.Println("Use 'spritesync pair <device>' to pair with another device.")
+		if len(devices) == 0 {
+			fmt.Println("No spritesync devices found on tailnet.")
+			fmt.Println("Make sure other devices are running 'spritesync serve'.")
 			return
 		}
 
-		fmt.Println("Paired Devices:")
-		fmt.Println()
-		for _, d := range pairedDevices {
-			name := d.Name
-			if name == "" {
-				name = "(unnamed)"
-			}
-			fmt.Printf("  %s\n", name)
-			fmt.Printf("    ID: %s\n", d.ID)
+		fmt.Printf("Found %d spritesync device(s):\n\n", len(devices))
+		for _, d := range devices {
+			fmt.Printf("  %s\n", d.Hostname)
+			fmt.Printf("    IP: %s\n", d.IP)
+			fmt.Printf("    Device ID: %s...%s\n", d.DeviceID[:7], d.DeviceID[len(d.DeviceID)-7:])
 			fmt.Println()
 		}
 	}
@@ -644,48 +726,15 @@ func addSyncthingDevice(deviceID, name string, autoAccept bool) error {
 	return nil
 }
 
-// waitForPairFile polls the inbox directory for a pairing file from the target
-func waitForPairFile(inboxDir string, timeout time.Duration) (deviceID, hostname string, err error) {
-	deadline := time.Now().Add(timeout)
-
-	for time.Now().Before(deadline) {
-		// Check for received pairing files
-		matches, _ := filepath.Glob(filepath.Join(inboxDir, "spritesync-pair-*.txt"))
-		for _, match := range matches {
-			data, err := os.ReadFile(match)
-			if err != nil {
-				continue
-			}
-
-			scanner := bufio.NewScanner(strings.NewReader(string(data)))
-			var lines []string
-			for scanner.Scan() {
-				lines = append(lines, scanner.Text())
-			}
-
-			if len(lines) >= 2 {
-				deviceID = strings.TrimSpace(lines[0])
-				hostname = strings.TrimSpace(lines[1])
-				os.Remove(match) // Clean up
-				return deviceID, hostname, nil
-			}
-		}
-
-		time.Sleep(time.Second)
-	}
-
-	return "", "", fmt.Errorf("timeout waiting for pairing file")
-}
-
 func cmdSync(args []string) {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	fs.Usage = func() {
 		fmt.Println("Usage: spritesync sync <directory> <device>")
 		fmt.Println()
 		fmt.Println("Sync a directory with another device.")
-		fmt.Println("Creates a shared folder in Syncthing between this device and the target.")
+		fmt.Println("Automatically discovers and pairs with the target device.")
 		fmt.Println()
-		fmt.Println("The folder ID is deterministic based on the directory path and hostname,")
+		fmt.Println("The folder ID is deterministic based on the directory path and hostnames,")
 		fmt.Println("so the same sync can be re-established after reconnection.")
 		fmt.Println()
 		fmt.Println("Example:")
@@ -730,6 +779,25 @@ func cmdSync(args []string) {
 		os.Exit(1)
 	}
 
+	// Auto-discover the target device
+	fmt.Printf("Discovering %s...\n", targetDevice)
+	discovered, err := discoverDeviceByName(targetDevice)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Make sure the target device is running 'spritesync serve'.")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Found %s (ID: %s...%s)\n", discovered.Hostname,
+		discovered.DeviceID[:7], discovered.DeviceID[len(discovered.DeviceID)-7:])
+
+	// Auto-pair: add device to Syncthing with autoAcceptFolders
+	fmt.Printf("Pairing with %s...\n", discovered.Hostname)
+	if err := addSyncthingDevice(discovered.DeviceID, discovered.Hostname, true); err != nil {
+		fmt.Fprintf(os.Stderr, "Error adding device: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Get our hostname for deterministic folder ID
 	myHostname, err := getTailscaleHostname()
 	if err != nil {
@@ -738,30 +806,21 @@ func cmdSync(args []string) {
 	}
 
 	// Generate deterministic folder ID from path and hostnames
-	// Sort hostnames to ensure same ID regardless of which device initiates
-	folderID := generateFolderID(absPath, myHostname, targetDevice)
-
-	// Get the directory name for label
+	folderID := generateFolderID(absPath, myHostname, discovered.Hostname)
 	folderLabel := filepath.Base(absPath)
 
-	// Find the target device ID from paired devices
-	targetDeviceID, err := getDeviceIDByName(targetDevice)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: device '%s' not found. Have you paired with it?\n", targetDevice)
-		fmt.Fprintln(os.Stderr, "Use 'spritesync pair <device>' first to pair.")
-		os.Exit(1)
-	}
-
 	// Add the folder to Syncthing
-	if err := addSyncthingFolder(folderID, folderLabel, absPath, targetDeviceID); err != nil {
+	fmt.Printf("Creating sync folder...\n")
+	if err := addSyncthingFolder(folderID, folderLabel, absPath, discovered.DeviceID); err != nil {
 		fmt.Fprintf(os.Stderr, "Error adding folder to Syncthing: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Syncing %s with %s\n", absPath, targetDevice)
+	fmt.Println()
+	fmt.Printf("Syncing %s with %s\n", absPath, discovered.Hostname)
 	fmt.Printf("Folder ID: %s\n", folderID)
 	fmt.Println()
-	fmt.Println("The remote device will auto-accept this folder if autoAcceptFolders is enabled.")
+	fmt.Println("The remote device will auto-accept this folder.")
 	fmt.Println("Use 'spritesync status' to check sync progress.")
 }
 
