@@ -1,11 +1,5 @@
 # spritesync
 
-> [!WARNING]
-> This is experimental software. Use at your own risk.
-> - May corrupt files or directories if sync conflicts occur
-> - May prevent Sprites from hibernating (services keep running)
-> - Not recommended for critical data without backups
-
 Sync directories between [Sprites](https://sprites.dev) using [Syncthing](https://syncthing.net) over [Tailscale](https://tailscale.com).
 
 ## Features
@@ -15,6 +9,12 @@ Sync directories between [Sprites](https://sprites.dev) using [Syncthing](https:
 - **Auto-discovery** - Devices find each other automatically
 - Secure peer-to-peer sync over Tailscale (no public relays)
 - Works with systemd or Sprite service managers
+
+> [!WARNING]
+> This is experimental software. Use at your own risk.
+> - May corrupt files or directories if sync conflicts occur
+> - May prevent Sprites from hibernating (services keep running)
+> - Not recommended for critical data without backups
 
 ## Quick Start
 
