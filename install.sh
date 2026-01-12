@@ -529,40 +529,58 @@ description: Use this skill when users want to sync directories between Sprite V
 
 You help manage Syncthing-based directory synchronization between Sprite VMs over Tailscale.
 
+## Mesh Sync (Recommended)
+
+Create named sync groups that any device can join:
+
+```bash
+# On first Sprite - create the group
+spritesync create myproject ~/code/myproject
+
+# On every other Sprite - just join
+spritesync join myproject
+```
+
+All devices in a group sync in a mesh (no single point of failure).
+
 ## Commands
 
-### Sync Directories (auto-discovers and pairs)
+### Mesh Sync
 ```bash
-spritesync sync ~/myproject <device-name>   # Sync a directory with another device
+spritesync create <name> <dir>   # Create a named sync group
+spritesync join <name>           # Join an existing sync group
+spritesync groups                # List sync groups on this device
+```
+
+### Direct Sync (one-off between two devices)
+```bash
+spritesync sync ~/myproject <device-name>   # Sync with a specific device
 spritesync unsync ~/myproject               # Stop syncing a directory
 ```
 
-### Check Status
+### Status & Discovery
 ```bash
 spritesync status        # Show sync status of all folders
-spritesync status --json # Machine-readable output
-```
-
-### Discover Devices
-```bash
 spritesync devices       # Discover spritesync devices on the tailnet
-spritesync info          # Show this device's Syncthing ID and Tailscale hostname
+spritesync info          # Show this device's Syncthing ID and hostname
 ```
 
 ## Quick Actions
 
 When user asks to:
-- "sync folder with X" -> Run `spritesync sync <folder> X` (auto-discovers and pairs)
-- "sync status" / "what's syncing" -> Run `spritesync status`
-- "stop syncing" -> Run `spritesync unsync <folder>`
-- "find devices" / "list devices" -> Run `spritesync devices`
-- "show device id" -> Run `spritesync info`
+- "create a sync" / "new sync group" -> `spritesync create <name> <dir>`
+- "join sync" / "join group" -> `spritesync join <name>`
+- "list groups" / "what groups" -> `spritesync groups`
+- "sync status" / "what's syncing" -> `spritesync status`
+- "find devices" / "list devices" -> `spritesync devices`
+- "stop syncing" -> `spritesync unsync <folder>`
 
 ## How It Works
 
-1. Devices auto-discover each other via the spritesync discovery service (port 8385)
-2. When you run `sync`, it automatically discovers and pairs with the target
-3. No manual pairing required - tailnet membership = trust
+1. `create` makes a named sync group and registers it with the discovery service
+2. `join` finds the group on the tailnet and connects to ALL existing members
+3. All devices sync in a mesh - any device can go down without breaking sync
+4. Tailnet membership = trust (no manual device approval needed)
 
 ## Troubleshooting
 
