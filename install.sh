@@ -284,20 +284,28 @@ EOF
 setup_syncthing_service() {
     if is_sprite; then
         substep "Creating syncthing service..."
+
+        # Force clean removal of any existing service
+        sprite-env services stop syncthing > /dev/null 2>&1 || true
         sprite-env services delete syncthing > /dev/null 2>&1 || true
-        sleep 1
+        sleep 2
+
         local syncthing_path=$(which syncthing)
         if [ -z "$syncthing_path" ]; then
             error "syncthing not found in PATH"
         fi
-        if ! sprite-env services create syncthing \
+
+        sprite-env services create syncthing \
             --cmd "$syncthing_path" \
             --args "serve,--no-browser,--no-default-folder,--config=$SYNCTHING_CONFIG_DIR,--data=$SYNCTHING_CONFIG_DIR" \
             --needs tailscaled \
-            --no-stream; then
-            error "Failed to create syncthing service"
+            --no-stream 2>&1 || true
+
+        # Verify service is actually running
+        sleep 3
+        if ! sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "syncthing" and .state.status == "running")' > /dev/null 2>&1; then
+            error "syncthing service failed to start - check: sprite-env services list"
         fi
-        sleep 2
         info "syncthing service running"
     elif command -v systemctl &> /dev/null; then
         substep "Creating systemd service..."
@@ -333,20 +341,28 @@ EOF
 setup_spritesync_service() {
     if is_sprite; then
         substep "Creating spritesync service..."
+
+        # Force clean removal of any existing service
+        sprite-env services stop spritesync > /dev/null 2>&1 || true
         sprite-env services delete spritesync > /dev/null 2>&1 || true
-        sleep 1
+        sleep 2
+
         if [ ! -x "$INSTALL_DIR/spritesync" ]; then
             warn "spritesync binary not found at $INSTALL_DIR/spritesync - skipping service"
             return 0
         fi
-        if ! sprite-env services create spritesync \
+
+        sprite-env services create spritesync \
             --cmd "$INSTALL_DIR/spritesync" \
             --args "serve" \
             --needs syncthing \
-            --no-stream; then
-            error "Failed to create spritesync service"
+            --no-stream 2>&1 || true
+
+        # Verify service is actually running
+        sleep 3
+        if ! sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "spritesync" and .state.status == "running")' > /dev/null 2>&1; then
+            error "spritesync service failed to start - check: sprite-env services list"
         fi
-        sleep 2
         info "spritesync discovery service running"
     elif command -v systemctl &> /dev/null; then
         substep "Creating spritesync systemd service..."
