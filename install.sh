@@ -286,11 +286,18 @@ setup_syncthing_service() {
         substep "Creating syncthing service..."
         sprite-env services delete syncthing > /dev/null 2>&1 || true
         sleep 1
-        sprite-env services create syncthing \
-            --cmd "$(which syncthing)" \
+        local syncthing_path=$(which syncthing)
+        if [ -z "$syncthing_path" ]; then
+            error "syncthing not found in PATH"
+        fi
+        if ! sprite-env services create syncthing \
+            --cmd "$syncthing_path" \
             --args "serve,--no-browser,--no-default-folder,--config=$SYNCTHING_CONFIG_DIR,--data=$SYNCTHING_CONFIG_DIR" \
             --needs tailscaled \
-            --no-stream > /dev/null 2>&1
+            --no-stream; then
+            error "Failed to create syncthing service"
+        fi
+        sleep 2
         info "syncthing service running"
     elif command -v systemctl &> /dev/null; then
         substep "Creating systemd service..."
@@ -328,11 +335,18 @@ setup_spritesync_service() {
         substep "Creating spritesync service..."
         sprite-env services delete spritesync > /dev/null 2>&1 || true
         sleep 1
-        sprite-env services create spritesync \
+        if [ ! -x "$INSTALL_DIR/spritesync" ]; then
+            warn "spritesync binary not found at $INSTALL_DIR/spritesync - skipping service"
+            return 0
+        fi
+        if ! sprite-env services create spritesync \
             --cmd "$INSTALL_DIR/spritesync" \
             --args "serve" \
             --needs syncthing \
-            --no-stream > /dev/null 2>&1
+            --no-stream; then
+            error "Failed to create spritesync service"
+        fi
+        sleep 2
         info "spritesync discovery service running"
     elif command -v systemctl &> /dev/null; then
         substep "Creating spritesync systemd service..."
