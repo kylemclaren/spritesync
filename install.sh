@@ -342,23 +342,24 @@ setup_syncthing_service() {
     if is_sprite; then
         substep "Creating syncthing service..."
 
-        # Check if service already exists and is running
-        if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "syncthing" and .state.status == "running")' > /dev/null 2>&1; then
-            # Service exists and running - restart it to pick up any config changes
+        # Check if service already exists (any state)
+        if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "syncthing")' > /dev/null 2>&1; then
+            # Service exists - just restart it to pick up any config/binary changes
             sprite-env services stop syncthing > /dev/null 2>&1 || true
             sleep 1
             sprite-env services start syncthing > /dev/null 2>&1 || true
             sleep 2
-            info "syncthing service restarted"
-            return 0
+            if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "syncthing" and .state.status == "running")' > /dev/null 2>&1; then
+                info "syncthing service restarted"
+                return 0
+            fi
+            # If restart failed, continue to try creating fresh
+            warn "syncthing restart failed, recreating..."
+            sprite-env services delete syncthing > /dev/null 2>&1 || true
+            sleep 2
         fi
 
-        # Service doesn't exist or isn't running - clean up and create fresh
-        sprite-env services stop syncthing > /dev/null 2>&1 || true
-        sleep 1
-        sprite-env services delete syncthing > /dev/null 2>&1 || true
-        sleep 2
-
+        # Service doesn't exist - create it
         local syncthing_path=$(which syncthing)
         if [ -z "$syncthing_path" ]; then
             error "syncthing not found in PATH"
@@ -416,23 +417,24 @@ setup_spritesync_service() {
             return 0
         fi
 
-        # Check if service already exists and is running
-        if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "spritesync" and .state.status == "running")' > /dev/null 2>&1; then
-            # Service exists and running - restart it to use new binary
+        # Check if service already exists (any state)
+        if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "spritesync")' > /dev/null 2>&1; then
+            # Service exists - just restart it to use new binary
             sprite-env services stop spritesync > /dev/null 2>&1 || true
             sleep 1
             sprite-env services start spritesync > /dev/null 2>&1 || true
             sleep 2
-            info "spritesync discovery service restarted"
-            return 0
+            if sprite-env services list 2>/dev/null | jq -e '.[] | select(.name == "spritesync" and .state.status == "running")' > /dev/null 2>&1; then
+                info "spritesync discovery service restarted"
+                return 0
+            fi
+            # If restart failed, continue to try creating fresh
+            warn "spritesync restart failed, recreating..."
+            sprite-env services delete spritesync > /dev/null 2>&1 || true
+            sleep 2
         fi
 
-        # Service doesn't exist or isn't running - clean up and create fresh
-        sprite-env services stop spritesync > /dev/null 2>&1 || true
-        sleep 1
-        sprite-env services delete spritesync > /dev/null 2>&1 || true
-        sleep 2
-
+        # Service doesn't exist - create it
         sprite-env services create spritesync \
             --cmd "$INSTALL_DIR/spritesync" \
             --args "serve" \
