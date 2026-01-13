@@ -11,10 +11,7 @@ Sync directories between [Sprites](https://sprites.dev) using [Syncthing](https:
 - Works with systemd or Sprite service managers
 
 > [!WARNING]
-> This is experimental software. Use at your own risk.
-> - May corrupt files or directories if sync conflicts occur
-> - May prevent Sprites from hibernating (services keep running)
-> - Not recommended for critical data without backups
+> This is experimental software that may corrupt files or directories if sync conflicts occur and is not recommended for critical data without backups. Use at your own risk.
 
 ## Quick Start
 
