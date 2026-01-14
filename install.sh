@@ -642,9 +642,14 @@ main() {
     echo -e "  ${DIM}Syncthing:${NC}  ${ts_ip}:22000"
     echo -e "  ${DIM}Discovery:${NC}  ${ts_ip}:8385"
     echo ""
-    echo -e "  ${DIM}Usage:${NC}"
-    echo -e "    ${BOLD}spritesync devices${NC}              # Find other spritesync devices"
-    echo -e "    ${BOLD}spritesync sync <dir> <device>${NC}  # Sync a directory"
+    echo -e "  ${DIM}Quick Start:${NC}"
+    echo -e "    ${BOLD}spritesync create skills ~/.claude/skills${NC}  # Create a sync group"
+    echo -e "    ${BOLD}spritesync join skills${NC}                     # Join from other devices"
+    echo ""
+    echo -e "  ${DIM}Other Commands:${NC}"
+    echo -e "    ${BOLD}spritesync devices${NC}    # Find other spritesync devices"
+    echo -e "    ${BOLD}spritesync status${NC}     # Check sync status"
+    echo -e "    ${BOLD}spritesync groups${NC}     # List sync groups"
     echo ""
 }
 

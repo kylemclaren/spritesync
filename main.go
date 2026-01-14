@@ -305,6 +305,75 @@ func cmdServe(args []string) {
 		json.NewEncoder(w).Encode(groups.Groups)
 	})
 
+	// /register - allows a remote device to register itself with this device
+	// This enables bidirectional sync when a new device joins a group
+	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			DeviceID string `json:"device_id"`
+			Hostname string `json:"hostname"`
+			IP       string `json:"ip"`
+			FolderID string `json:"folder_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Validate required fields
+		if req.DeviceID == "" || req.Hostname == "" || req.FolderID == "" {
+			http.Error(w, "Missing required fields: device_id, hostname, folder_id", http.StatusBadRequest)
+			return
+		}
+
+		// Check if we have this folder
+		groups, err := loadSyncGroups()
+		if err != nil {
+			http.Error(w, "Failed to load sync groups", http.StatusInternalServerError)
+			return
+		}
+
+		hasFolder := false
+		for _, g := range groups.Groups {
+			if g.FolderID == req.FolderID {
+				hasFolder = true
+				break
+			}
+		}
+
+		if !hasFolder {
+			http.Error(w, "Folder not found on this device", http.StatusNotFound)
+			return
+		}
+
+		// Add the requesting device to our Syncthing config
+		if err := addSyncthingDevice(req.DeviceID, req.Hostname, req.IP, true); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to add device: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Share the folder with the requesting device
+		cmd := exec.Command("syncthing", "cli", "config", "folders", req.FolderID, "devices", "add",
+			"--device-id", req.DeviceID,
+		)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			if !strings.Contains(string(output), "already exists") {
+				http.Error(w, fmt.Sprintf("Failed to share folder: %s", string(output)), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok",
+		})
+	})
+
 	// Create server
 	addr := fmt.Sprintf("%s:%d", tsIP, discoveryPort)
 	server := &http.Server{
@@ -1301,6 +1370,23 @@ func cmdJoin(args []string) {
 		}
 	}
 
+	// Get our own device info for registration
+	myDeviceID, err := getSyncthingDeviceID()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting device ID: %v\n", err)
+		os.Exit(1)
+	}
+	myHostname, err := getTailscaleHostname()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting hostname: %v\n", err)
+		os.Exit(1)
+	}
+	myIP, err := getTailscaleIP()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting Tailscale IP: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Add the founding device to Syncthing
 	fmt.Printf("Adding device %s...\n", foundDevice.Hostname)
 	if err := addSyncthingDevice(foundDevice.DeviceID, foundDevice.Hostname, foundDevice.IP, true); err != nil {
@@ -1335,6 +1421,13 @@ func cmdJoin(args []string) {
 		}
 	}
 
+	// Register ourselves with the founding device so it adds us to its config
+	fmt.Printf("Registering with %s...\n", foundDevice.Hostname)
+	if err := registerWithDevice(*foundDevice, myDeviceID, myHostname, myIP, foundGroup.FolderID); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to register with %s: %v\n", foundDevice.Hostname, err)
+		fmt.Fprintln(os.Stderr, "The remote device may need to be updated to support registration.")
+	}
+
 	// Now discover and add ALL devices that have this group
 	fmt.Println("Connecting to other group members...")
 	memberCount := 1 // counting the first device we found
@@ -1364,6 +1457,8 @@ func cmdJoin(args []string) {
 					"--device-id", device.DeviceID,
 				)
 				cmd.Run()
+				// Register ourselves with this device too
+				registerWithDevice(device, myDeviceID, myHostname, myIP, foundGroup.FolderID)
 				memberCount++
 				fmt.Printf("  + %s\n", device.Hostname)
 			}
@@ -1389,6 +1484,43 @@ func cmdJoin(args []string) {
 	fmt.Printf("  Members: %d device(s)\n", memberCount)
 	fmt.Println()
 	fmt.Println("Files will sync automatically. Use 'spritesync status' to check progress.")
+}
+
+// registerWithDevice registers this device with a remote device for a specific folder
+// This enables bidirectional sync by having the remote device add us to its config
+func registerWithDevice(device DiscoveredDevice, myDeviceID, myHostname, myIP, folderID string) error {
+	url := fmt.Sprintf("http://%s:%d/register", device.IP, discoveryPort)
+
+	reqBody := struct {
+		DeviceID string `json:"device_id"`
+		Hostname string `json:"hostname"`
+		IP       string `json:"ip"`
+		FolderID string `json:"folder_id"`
+	}{
+		DeviceID: myDeviceID,
+		Hostname: myHostname,
+		IP:       myIP,
+		FolderID: folderID,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", strings.NewReader(string(jsonData)))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("registration failed: %s", strings.TrimSpace(string(body)))
+	}
+
+	return nil
 }
 
 // getDeviceSyncGroups queries a device for its sync groups
